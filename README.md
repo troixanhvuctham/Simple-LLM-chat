@@ -9,12 +9,13 @@ A lightweight chat application powered by a Large Language Model (LLM).
 - Easy to customize and extend
 
 ## Installation
-
+```bash
 pip install -U gradio
 pip install transformers
+```
 
 ## Usage
-
+```
 python app.py
 ```
 
