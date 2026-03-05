@@ -152,7 +152,7 @@ def chat_with_assistant(message, history):
             break
 
     _, left = extract_think_and_left(response)
-    answer = extract_answer(response)
+    answer = extract_answer(left)
     answer = left.strip()
     if answer == "No answer tag found":
         answer = response
