@@ -1,7 +1,7 @@
 import time
 import gradio as gr
 import os
-from utils import extract_answer, merge_small_chunks, extract_json
+from utils import extract_answer, merge_small_chunks, extract_json, extract_think_and_left
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 import pymupdf
@@ -10,10 +10,12 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores.utils import DistanceStrategy
-from Constant import SYSTEM_PROMPT, RAG_PROMPT
+from Constant import SYSTEM_PROMPT2, RAG_PROMPT
 
-
+MAX_LOOP = 3
+MAX_TOKEN = 4000
 EMBEDDING_MODEL_NAME = "Qwen/Qwen3-Embedding-0.6B"
+PLANNER_MODEL_NAME = "Qwen/Qwen3-4B-Thinking-2507"
 embedding_model = HuggingFaceEmbeddings(
     model_name=EMBEDDING_MODEL_NAME,
     multi_process=True,
@@ -22,32 +24,21 @@ embedding_model = HuggingFaceEmbeddings(
 )
 
 model = AutoModelForCausalLM.from_pretrained(
-    "Qwen/Qwen3-4B-Instruct-2507",
+    PLANNER_MODEL_NAME,
     torch_dtype="auto",
     device_map="cuda"
 )
-tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B-Instruct-2507")
-
-
-READER_LLM = pipeline(model=model,
-        tokenizer=tokenizer,
-        task="text-generation",
-        do_sample=True,
-        temperature=0.2,
-        repetition_penalty=1.1,
-        return_full_text=False,
-        max_new_tokens=1500,
-    )
-
+tokenizer = AutoTokenizer.from_pretrained(PLANNER_MODEL_NAME)
 
 RAG_PROMPT_TEMPLATE = tokenizer.apply_chat_template(
     RAG_PROMPT, tokenize=False, add_generation_prompt=True
 )
+DOCUMENT_FILE = "Recipe-Book.pdf"
+#DOCUMENT_FILE = "sub_grimm.pdf"
 
 def load_knowledge():
     print("LOADING KNOWLEDGE...")
-    doc = pymupdf.open("sub_grimm.pdf") # open a document
-
+    doc = pymupdf.open(DOCUMENT_FILE) # open a document
     all_text = "\n\n".join([page.get_text() for page in doc])
     chunks = chunking_text(all_text)
     KNOWLEDGE_BASE = [LangchainDocument(page_content=chunk) for chunk in chunks]
@@ -72,25 +63,36 @@ def chunking_text(all_text):
             separators=MARKDOWN_SEPARATORS,
         )
     chunks = text_splitter.split_text(all_text)
-    chunks = merge_small_chunks(chunks)
+    #chunks = merge_small_chunks(chunks)
     return chunks
 
-def retrieve_document(user_query, KNOWLEDGE_VECTOR_DATABASE):
+def retrieve_document(user_query):
     print(f"\nStarting retrieval for {user_query=}...")
     retrieved_docs = KNOWLEDGE_VECTOR_DATABASE.similarity_search(query=user_query, k=5)
-
     retrieved_docs_text = [doc.page_content for doc in retrieved_docs]
-
     context = "\nExtracted documents:\n"
-
     context += "".join(
         [f"Document {str(i)}:::\n" + doc for i, doc in enumerate(retrieved_docs_text)]
     )
 
     return context
 
+def model_inferencing(text):
+    model_inputs = tokenizer([text], return_tensors="pt")
 
-HISTORY = [{"role": "system", "content": SYSTEM_PROMPT}] 
+    generated_ids = model.generate(
+        model_inputs.input_ids.cuda(),
+        max_new_tokens=MAX_TOKEN
+    )
+    generated_ids = [
+        output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
+    ]
+
+    response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+
+    return response
+
+HISTORY = [{"role": "system", "content": SYSTEM_PROMPT2}] 
 
 def chat_with_assistant(message, history):
 
@@ -102,89 +104,81 @@ def chat_with_assistant(message, history):
         messages,
         tokenize=False,
         add_generation_prompt=True,
-        enable_thinking=True
     )
 
     print("TEXT:")
     print(text)
     print("==============")
 
-    model_inputs = tokenizer([text], return_tensors="pt")
+    response = model_inferencing(text)
 
-    generated_ids = model.generate(
-        model_inputs.input_ids.cuda(),
-        max_new_tokens=512
-    )
-    generated_ids = [
-        output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
-    ]
-
-    response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
     print("RESPONSE 1:")
     print(response)
 
-
-    data = extract_json(response)
-    print("DATA: ", data)
-
-    if data:
-        result = execute_action(data)
-
-        print("OUTPUT RAG:")
-        print(result)
-        HISTORY.append({"role": "tool", "content": result})
-
-        text = tokenizer.apply_chat_template(
-        HISTORY,
-        tokenize=False,
-        add_generation_prompt=True)
-
-        model_inputs = tokenizer([text], return_tensors="pt")
-
-        generated_ids = model.generate(
-            model_inputs.input_ids.cuda(),
-            max_new_tokens=1000
-        )
-        generated_ids = [
-            output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
-        ]
-
-        response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        print("RESPONSE 2:")
-        print(response)
-        print("END RESPONSE 2:")
-
-        answer = extract_answer(response)
-        HISTORY.append({"function": "assistant", "content": answer})
-
-        for i in range(len(answer)):
-            time.sleep(0.01)
-            yield answer[: i+1]
-    else:
-        answer = extract_answer(response)
-        if answer == "No answer tag found":
-            answer = response
-        
-
-        HISTORY.append({"role": "assistant", "content": answer})
-        for i in range(len(answer)):
-            time.sleep(0.01)
-            yield answer[: i+1]
+    _, left = extract_think_and_left(response)
+    data = extract_json(left)
 
 
-def call_rag_story(question):
+    loop = 0
+    while loop<3:
+        loop+=1
+        print("DATA JSON EXTRACTED: ", data)
+
+        if data:
+            result = execute_action(data)
+
+            print("OUTPUT RAG:")
+            print(result)
+            print("=======OUTPUT RAG=========")
+            HISTORY.append({"role": "tool", "content": result})
+
+            print("HISTORY")
+            print(HISTORY)
+            print("=======END HISTORY=========")
+
+            text = tokenizer.apply_chat_template(
+                HISTORY,
+                tokenize=False,
+                add_generation_prompt=True)
+
+            response = model_inferencing(text)
+            print("RESPONSE 2:")
+            print(response)
+            print("END RESPONSE 2:")
+            data = extract_json(response)
+            if data == None:
+                break
+        else:
+            break
+
+    _, left = extract_think_and_left(response)
+    answer = extract_answer(response)
+    answer = left.strip()
+    if answer == "No answer tag found":
+        answer = response
+
+    HISTORY.append({"role": "assistant", "content": answer})
+    for i in range(len(answer)):
+        time.sleep(0.01)
+        yield answer[: i+1]
+
+def call_rag(question):
     """
     Use this tool to answer questions about story,
     and something relevant such as characters, story summarization.
     """
-    context = retrieve_document(question, KNOWLEDGE_VECTOR_DATABASE)
-
+    context = retrieve_document(question)
+    #return context
     final_prompt = RAG_PROMPT_TEMPLATE.format(question=question, context=context)
 
-    answer = READER_LLM(final_prompt)[0]["generated_text"]
+    print("PROMPT RAG:")
+    print(final_prompt)
 
+    answer = model_inferencing(final_prompt)
+
+    answer = answer.replace("<think>","").replace("</think>","")
     return answer
-
+    
 def execute_action(data):
     action = data["action"]
 
@@ -202,7 +196,7 @@ def main():
     ).launch()
     
 TOOLS = {
-    "call_rag_story": call_rag_story,
+    "call_rag": call_rag,
 }
 
 if __name__ == "__main__":
@@ -211,4 +205,4 @@ if __name__ == "__main__":
     print("STARTING...")
     gr.ChatInterface(
         fn=chat_with_assistant
-    ).launch()
+    ).launch(share=False)

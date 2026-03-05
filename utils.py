@@ -3,7 +3,7 @@ import json
 from langchain.tools import tool
 
 
-def extract_answer(text):
+def ________extract_answer(text):
     match = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL)
 
     if match:
@@ -12,6 +12,21 @@ def extract_answer(text):
         return extracted_text
     else:
         return "No answer tag found"
+        
+def extract_answer(text: str) -> str:
+    answer = text.split("<answer>")[-1]
+    answer = answer.split("</answer>")[0]
+    return answer.strip()
+
+def extract_think_and_left(text: str) -> str:
+    '''
+    Extract thinking part and the remain part from LLM response
+    '''
+    think_and_left =  text.split("</think>")
+    think = think_and_left[0].split("<think>")[0].strip()
+    left = think_and_left[1]
+    return think, left
+    
 def merge_small_chunks(chunks, min_length = 200):
     merged = []
     buffer = ""
@@ -34,12 +49,3 @@ def extract_json(text):
             return json.loads(match.group())
     except:
         return None
-@tool
-def document_search(query: str) -> str:
-    """
-    Use this tool to answer questions about story,
-    and something relevant such as characters, story summarization.
-    Input should be a natural language question.
-    """
-    docs = retriever.get_relevant_documents(query)
-    return combine_docs(docs)
