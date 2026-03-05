@@ -11,7 +11,8 @@ A lightweight chat application powered by a Large Language Model (LLM).
 ## Installation
 ```bash
 pip install -U gradio
-pip install transformers
+pip install transformers langchain langchain-core faiss-cpu accelerate
+
 ```
 
 ## Usage
