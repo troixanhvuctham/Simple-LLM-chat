@@ -17,7 +17,7 @@ pip install transformers langchain langchain-core faiss-cpu accelerate
 
 ## Usage
 ```
-python app.py
+python app_rag.py
 ```
 
 Open your browser and go to `http://localhost:7860`.
